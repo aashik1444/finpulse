@@ -26,3 +26,6 @@ Thumbs.db
 docgen/
 *.docx
 finpulse-ledger-docx-prompt.md
+
+# Local learning journal source (study material, not part of the project)
+learndoc/
