@@ -4,6 +4,7 @@ import com.finpulse.ledger.service.AccountNotFoundException;
 import com.finpulse.ledger.service.CurrencyMismatchException;
 import com.finpulse.ledger.service.InsufficientFundsException;
 import com.finpulse.ledger.service.TransactionNotFoundException;
+import com.finpulse.ledger.service.TransferRetriesExhaustedException;
 import com.finpulse.ledger.web.dto.ErrorResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
@@ -42,6 +43,17 @@ public class ApiExceptionHandler {
     public ResponseEntity<ErrorResponse> handleTransactionNotFound(
             TransactionNotFoundException ex, HttpServletRequest request) {
         return build(HttpStatus.NOT_FOUND, "TRANSACTION_NOT_FOUND", ex.getMessage(), request);
+    }
+
+    // 409 Conflict: the request was valid and may well succeed if sent again. This is
+    // the honest answer when contention on one account was heavy enough that the
+    // bounded retry gave up. 503 would wrongly imply the service is down; 500 would
+    // wrongly imply a bug. 409 tells the caller it is safe to retry, and because the
+    // request carries an idempotency key, retrying is in fact safe.
+    @ExceptionHandler(TransferRetriesExhaustedException.class)
+    public ResponseEntity<ErrorResponse> handleRetriesExhausted(
+            TransferRetriesExhaustedException ex, HttpServletRequest request) {
+        return build(HttpStatus.CONFLICT, "CONCURRENT_MODIFICATION", ex.getMessage(), request);
     }
 
     @ExceptionHandler(CurrencyMismatchException.class)

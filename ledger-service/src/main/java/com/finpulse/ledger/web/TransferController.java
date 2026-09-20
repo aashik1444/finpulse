@@ -2,8 +2,8 @@ package com.finpulse.ledger.web;
 
 import com.finpulse.ledger.domain.LedgerEntry;
 import com.finpulse.ledger.repository.LedgerEntryRepository;
+import com.finpulse.ledger.service.TransferExecutor;
 import com.finpulse.ledger.service.TransferResult;
-import com.finpulse.ledger.service.TransferService;
 import com.finpulse.ledger.web.dto.LedgerEntryResponse;
 import com.finpulse.ledger.web.dto.TransferRequest;
 import com.finpulse.ledger.web.dto.TransferResponse;
@@ -26,7 +26,9 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class TransferController {
 
-    private final TransferService transferService;
+    // Depends on TransferExecutor, not TransferService directly, so that every real
+    // request gets the optimistic-lock retry, not just the concurrency test.
+    private final TransferExecutor transferExecutor;
     private final LedgerEntryRepository entryRepository;
 
     // The idempotency key travels as a header, not a body field, following the
@@ -37,7 +39,7 @@ public class TransferController {
             @Valid @RequestBody TransferRequest request,
             @RequestHeader("Idempotency-Key") String idempotencyKey) {
 
-        TransferResult result = transferService.transfer(
+        TransferResult result = transferExecutor.executeWithRetry(
                 request.fromAccountId(), request.toAccountId(), request.amountMinor(), idempotencyKey);
 
         TransferResponse body = new TransferResponse(

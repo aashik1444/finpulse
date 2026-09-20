@@ -88,4 +88,84 @@ public class TransferService {
 
         return new TransferResult(transaction, List.of(debitEntry, creditEntry), false);
     }
+
+    /**
+     * The pessimistic alternative to {@link #transfer}, kept so the two strategies can
+     * be measured against the same concurrency test rather than compared in the abstract.
+     *
+     * <p>Identical to transfer() except that both accounts are loaded with
+     * {@code SELECT ... FOR UPDATE}. A competing transaction blocks at that SELECT until
+     * this one finishes, so there is no optimistic failure and no retry wrapper: conflicts
+     * become waits instead of exceptions.
+     *
+     * <p>The tradeoff is real in both directions. Under low contention this is strictly
+     * worse, because every transfer pays for a lock nobody was competing for. Under heavy
+     * contention on one account it is strictly better, because optimistic retry degenerates
+     * into wasted work: with N threads on one row only one can win per round, so the rest
+     * burn attempts and give up. Measured numbers for both are in the learning journal.
+     */
+    @Transactional
+    public TransferResult transferPessimistic(UUID fromId, UUID toId, long amountMinor,
+                                              String idempotencyKey) {
+
+        Optional<LedgerTransaction> existing = transactionRepository.findByIdempotencyKey(idempotencyKey);
+        if (existing.isPresent()) {
+            LedgerTransaction tx = existing.get();
+            List<LedgerEntry> entries = entryRepository.findByTransactionId(tx.getId());
+            return new TransferResult(tx, entries, true);
+        }
+
+        if (amountMinor <= 0) {
+            throw new IllegalArgumentException("amountMinor must be positive");
+        }
+        if (fromId.equals(toId)) {
+            throw new IllegalArgumentException("fromAccountId and toAccountId must differ");
+        }
+
+        // Lock in a globally consistent order, smaller UUID first, regardless of transfer
+        // direction. Without this, a transfer A->B locking A then waiting for B, racing a
+        // transfer B->A locking B then waiting for A, deadlocks: each holds what the other
+        // needs. Postgres detects it and kills one, but the right fix is to make the cycle
+        // impossible rather than to handle it after the fact. Every transaction touching
+        // both rows asks for them in the same order, so no cycle can form.
+        boolean fromIsFirst = fromId.compareTo(toId) < 0;
+        UUID firstLock = fromIsFirst ? fromId : toId;
+        UUID secondLock = fromIsFirst ? toId : fromId;
+
+        Account first = accountRepository.findByIdForUpdate(firstLock)
+                .orElseThrow(() -> new AccountNotFoundException(firstLock));
+        Account second = accountRepository.findByIdForUpdate(secondLock)
+                .orElseThrow(() -> new AccountNotFoundException(secondLock));
+
+        Account from = fromIsFirst ? first : second;
+        Account to = fromIsFirst ? second : first;
+
+        if (!from.getCurrency().equals(to.getCurrency())) {
+            throw new CurrencyMismatchException(
+                    "Cannot transfer between accounts of different currencies: "
+                            + from.getCurrency() + " and " + to.getCurrency());
+        }
+
+        if (from.getBalanceMinor() < amountMinor) {
+            throw new InsufficientFundsException(
+                    "Account " + fromId + " has insufficient funds for transfer of " + amountMinor);
+        }
+
+        LedgerTransaction transaction = new LedgerTransaction(
+                idempotencyKey, "Transfer " + amountMinor + " from " + fromId + " to " + toId,
+                TransactionStatus.POSTED);
+        transactionRepository.save(transaction);
+
+        LedgerEntry debitEntry = new LedgerEntry(transaction, from, EntryDirection.DEBIT, amountMinor);
+        LedgerEntry creditEntry = new LedgerEntry(transaction, to, EntryDirection.CREDIT, amountMinor);
+        entryRepository.save(debitEntry);
+        entryRepository.save(creditEntry);
+
+        from.debit(amountMinor);
+        to.credit(amountMinor);
+        accountRepository.save(from);
+        accountRepository.save(to);
+
+        return new TransferResult(transaction, List.of(debitEntry, creditEntry), false);
+    }
 }
