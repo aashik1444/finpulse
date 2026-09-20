@@ -5,9 +5,13 @@ import com.finpulse.ledger.domain.EntryDirection;
 import com.finpulse.ledger.domain.LedgerEntry;
 import com.finpulse.ledger.domain.LedgerTransaction;
 import com.finpulse.ledger.domain.TransactionStatus;
+import com.finpulse.ledger.domain.OutboxEvent;
 import com.finpulse.ledger.repository.AccountRepository;
 import com.finpulse.ledger.repository.LedgerEntryRepository;
 import com.finpulse.ledger.repository.LedgerTransactionRepository;
+import com.finpulse.ledger.repository.OutboxEventRepository;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -23,6 +27,8 @@ public class TransferService {
     private final AccountRepository accountRepository;
     private final LedgerTransactionRepository transactionRepository;
     private final LedgerEntryRepository entryRepository;
+    private final OutboxEventRepository outboxEventRepository;
+    private final ObjectMapper objectMapper;
 
     /**
      * Moves money between two accounts, producing exactly one DEBIT and one CREDIT
@@ -86,7 +92,45 @@ public class TransferService {
         accountRepository.save(from);
         accountRepository.save(to);
 
+        recordOutboxEvent(transaction, fromId, toId, amountMinor);
+
         return new TransferResult(transaction, List.of(debitEntry, creditEntry), false);
+    }
+
+    /**
+     * Writes the TRANSFER_POSTED event into the outbox table.
+     *
+     * <p>This is the whole transactional outbox pattern, and the striking thing about
+     * it is how ordinary the code is. There is no coordination protocol and no
+     * special handling, because the row is written by the same repository, inside the
+     * same @Transactional method, as everything else in the transfer. The database's
+     * own atomicity guarantee, the one that already makes the two ledger entries
+     * commit together, extends to this third write for free.
+     *
+     * <p>That is precisely what makes it correct. The event and the money movement
+     * cannot disagree: either both are committed or neither is. Calling audit-service
+     * over HTTP here instead would be a dual write, two operations against two systems
+     * with no way to make them atomic, and either side could fail after the other
+     * succeeded.
+     *
+     * <p>Delivery is somebody else's problem, handled later and asynchronously by
+     * OutboxPoller. This method's only job is to make sure the event exists.
+     */
+    private void recordOutboxEvent(LedgerTransaction transaction, UUID fromId, UUID toId,
+                                   long amountMinor) {
+        OutboxTransferPostedPayload payload = new OutboxTransferPostedPayload(
+                transaction.getId(), fromId, toId, amountMinor, transaction.getCreatedAt());
+        String json;
+        try {
+            json = objectMapper.writeValueAsString(payload);
+        } catch (JsonProcessingException e) {
+            // Unchecked, so it rolls the whole transfer back. That is the right call:
+            // a transfer we cannot record an event for would break the guarantee that
+            // the ledger and the audit trail always agree.
+            throw new IllegalStateException("Failed to serialise outbox payload", e);
+        }
+        outboxEventRepository.save(
+                new OutboxEvent(transaction.getId(), "TRANSFER_POSTED", json));
     }
 
     /**
@@ -165,6 +209,8 @@ public class TransferService {
         to.credit(amountMinor);
         accountRepository.save(from);
         accountRepository.save(to);
+
+        recordOutboxEvent(transaction, fromId, toId, amountMinor);
 
         return new TransferResult(transaction, List.of(debitEntry, creditEntry), false);
     }
