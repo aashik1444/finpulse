@@ -1,7 +1,6 @@
 package com.finpulse.ledger.web;
 
-import com.finpulse.ledger.domain.LedgerEntry;
-import com.finpulse.ledger.repository.LedgerEntryRepository;
+import com.finpulse.ledger.service.StatementService;
 import com.finpulse.ledger.service.TransferExecutor;
 import com.finpulse.ledger.service.TransferResult;
 import com.finpulse.ledger.web.dto.LedgerEntryResponse;
@@ -29,7 +28,7 @@ public class TransferController {
     // Depends on TransferExecutor, not TransferService directly, so that every real
     // request gets the optimistic-lock retry, not just the concurrency test.
     private final TransferExecutor transferExecutor;
-    private final LedgerEntryRepository entryRepository;
+    private final StatementService statementService;
 
     // The idempotency key travels as a header, not a body field, following the
     // convention Stripe and most payment APIs use. It describes retry semantics,
@@ -59,7 +58,16 @@ public class TransferController {
 
     @GetMapping("/api/accounts/{id}/entries")
     public Page<LedgerEntryResponse> getEntries(@PathVariable UUID id, Pageable pageable) {
-        Page<LedgerEntry> entries = entryRepository.findByAccountId(id, pageable);
-        return entries.map(LedgerMapper::toResponse);
+        return statementService.getStatement(id, pageable);
+    }
+
+    /**
+     * The pre-fix implementation, kept reachable only so the N+1 measurement can be
+     * reproduced on demand against the same data as the fixed endpoint. Not part of
+     * the public API and not referenced by any client.
+     */
+    @GetMapping("/api/accounts/{id}/entries-naive")
+    public Page<LedgerEntryResponse> getEntriesNaive(@PathVariable UUID id, Pageable pageable) {
+        return statementService.getStatementNaive(id, pageable);
     }
 }

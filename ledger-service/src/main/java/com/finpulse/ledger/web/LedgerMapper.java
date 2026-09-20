@@ -26,10 +26,18 @@ public final class LedgerMapper {
     }
 
     public static LedgerEntryResponse toResponse(LedgerEntry entry) {
+        // getId() alone would NOT touch the database: a Hibernate lazy proxy already
+        // holds the foreign key, because it is a column on ledger_entry itself, so
+        // returning it needs no query. getOwnerName() and getDescription() are
+        // different: those values live only in the other table, so each call forces
+        // the proxy to initialise and issue its own SELECT. That is where the N+1
+        // comes from, and why the fetch strategy for this endpoint matters.
         return new LedgerEntryResponse(
                 entry.getId(),
                 entry.getTransaction().getId(),
                 entry.getAccount().getId(),
+                entry.getAccount().getOwnerName(),
+                entry.getTransaction().getDescription(),
                 entry.getDirection(),
                 entry.getAmountMinor(),
                 entry.getCreatedAt()
