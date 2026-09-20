@@ -1,5 +1,7 @@
 package com.finpulse.ledger.service;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Timer;
 import lombok.RequiredArgsConstructor;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Component;
@@ -46,15 +48,39 @@ public class TransferExecutor {
     private static final long MAX_BACKOFF_MILLIS = 100;
 
     private final TransferService transferService;
+    private final Counter transfersPostedCounter;
+    private final Timer transferLatencyTimer;
 
+    /**
+     * Times the whole call, including backoff sleeps between attempts. That is
+     * deliberate: from the caller's point of view the latency that matters is how long
+     * until they get an answer, and a transfer that needed three retries genuinely did
+     * take longer. Timing only the successful attempt would hide contention entirely.
+     */
     public TransferResult executeWithRetry(UUID fromId, UUID toId, long amountMinor,
                                            String idempotencyKey) {
+        return transferLatencyTimer.record(
+                () -> doExecuteWithRetry(fromId, toId, amountMinor, idempotencyKey));
+    }
+
+    private TransferResult doExecuteWithRetry(UUID fromId, UUID toId, long amountMinor,
+                                              String idempotencyKey) {
         long deadline = System.currentTimeMillis() + DEADLINE_MILLIS;
         int attempt = 0;
         while (true) {
             attempt++;
             try {
-                return transferService.transfer(fromId, toId, amountMinor, idempotencyKey);
+                TransferResult result =
+                        transferService.transfer(fromId, toId, amountMinor, idempotencyKey);
+                // Only count genuinely new transfers. An idempotent replay returns the
+                // original result without moving money, so counting it would make this
+                // metric measure requests received rather than transfers posted, and the
+                // two diverge exactly when a client is retrying, which is when you most
+                // want the number to be trustworthy.
+                if (!result.alreadyProcessed()) {
+                    transfersPostedCounter.increment();
+                }
+                return result;
             } catch (ObjectOptimisticLockingFailureException e) {
                 if (System.currentTimeMillis() >= deadline) {
                     throw new TransferRetriesExhaustedException(
