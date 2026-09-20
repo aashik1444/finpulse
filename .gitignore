@@ -1,0 +1,28 @@
+# Build output
+target/
+build/
+*.jar
+*.war
+*.class
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Project scaffolding and learning material (not part of the deliverable)
+docgen/
+*.docx
+finpulse-ledger-docx-prompt.md
