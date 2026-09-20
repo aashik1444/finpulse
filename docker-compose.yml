@@ -10,11 +10,66 @@ services:
       - "5432:5432"
     volumes:
       - finpulse-pgdata:/var/lib/postgresql/data
+      # Creates finpulse_audit on first start, so a clean checkout needs no manual step.
+      - ./init-audit-db.sql:/docker-entrypoint-initdb.d/init-audit-db.sql
     healthcheck:
+      # pg_isready reports whether Postgres is ACCEPTING CONNECTIONS, which is a later
+      # moment than the container process existing. The services below gate on this.
       test: ["CMD-SHELL", "pg_isready -U finpulse -d finpulse_ledger"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  audit-service:
+    build:
+      context: ./audit-service
+    container_name: finpulse-audit-service
+    environment:
+      # Host is "postgres", the compose service name, which Docker's internal DNS
+      # resolves to the container. Not localhost: inside a container that would mean
+      # the container itself.
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/finpulse_audit
+      SPRING_DATASOURCE_USERNAME: finpulse
+      SPRING_DATASOURCE_PASSWORD: finpulse
+      JAVA_TOOL_OPTIONS: -Duser.timezone=UTC
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+
+  ledger-service:
+    build:
+      context: ./ledger-service
+    container_name: finpulse-ledger-service
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/finpulse_ledger
+      SPRING_DATASOURCE_USERNAME: finpulse
+      SPRING_DATASOURCE_PASSWORD: finpulse
+      AUDIT_SERVICE_BASE_URL: http://audit-service:8081
+      JAVA_TOOL_OPTIONS: -Duser.timezone=UTC
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # Waiting on audit-service is a convenience for a clean demo, not a requirement.
+      # The outbox means ledger-service works perfectly well with audit-service absent;
+      # this just avoids a burst of retry warnings in the log on a cold start.
+      audit-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
 
 volumes:
   finpulse-pgdata:
